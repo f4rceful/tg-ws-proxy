@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -349,7 +350,108 @@ def set_autostart_enabled(enabled: bool, ignore_errors: bool = False) -> None:
             _show_error(f"Не удалось изменить автозапуск.\n\nОшибка: {exc}")
 
 
-# update check (CTK dialog)
+# update
+
+def _perform_update(download_url: str, set_status=None) -> None:
+    def _step(msg: str) -> None:
+        log.info("Update: %s", msg)
+        if set_status:
+            set_status(msg)
+            time.sleep(0.8)
+
+    def _err(msg: str) -> None:
+        log.error("Update error: %s", msg)
+        if set_status:
+            set_status(f"Ошибка: {msg}")
+        else:
+            _show_error(msg)
+
+    _step("Скачивание...")
+    cur_exe = Path(sys.executable)
+    old_exe = cur_exe.with_name(cur_exe.stem + "_oldtgws")
+    tmp_path = None
+    try:
+        from proxy.utils import build_github_opener
+        fd, tmp_name = tempfile.mkstemp(dir=cur_exe.parent, suffix=".tmp")
+        os.close(fd)
+        tmp_path = Path(tmp_name)
+        log.info("Downloading update from %s", download_url)
+        opener = build_github_opener()
+        with opener.open(download_url) as _resp:
+            with open(str(tmp_path), "wb") as _fout:
+                while True:
+                    _chunk = _resp.read(65536)
+                    if not _chunk:
+                        break
+                    _fout.write(_chunk)
+    except Exception as exc:
+        _err(f"Не удалось скачать:\n{exc}")
+        if tmp_path:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        return
+
+    _step("Замена файла...")
+    try:
+        tmp_path.chmod(0o755)
+    except Exception as exc:
+        log.warning("chmod failed: %s", exc)
+
+    try:
+        if old_exe.exists():
+            old_exe.unlink()
+        cur_exe.rename(old_exe)
+    except Exception as exc:
+        _err(f"Не удалось переименовать файл:\n{exc}")
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return
+
+    try:
+        tmp_path.rename(cur_exe)
+    except Exception as exc:
+        _err(f"Не удалось переместить файл:\n{exc}")
+        try:
+            old_exe.rename(cur_exe)
+        except OSError:
+            pass
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return
+
+    _step("Перезапуск...")
+    stop_proxy()
+
+    env = os.environ.copy()
+    for _k in [k for k in env if k.startswith("_PYI_") or k == "_MEIPASS"]:
+        del env[_k]
+    if hasattr(sys, "_MEIPASS"):
+        _mei = os.path.normcase(sys._MEIPASS.rstrip("/"))
+        env["PATH"] = os.pathsep.join(
+            p for p in env.get("PATH", "").split(os.pathsep)
+            if os.path.normcase(p.rstrip("/")) != _mei
+        )
+
+    try:
+        subprocess.Popen(
+            [str(cur_exe)],
+            env=env,
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+        )
+    except Exception as exc:
+        log.error("Failed to launch updated exe: %s", exc)
+    time.sleep(0.5)
+    os._exit(0)
+
 
 def _maybe_do_update(cfg: dict, is_exiting) -> None:
     if not cfg.get("check_updates", True):
@@ -362,7 +464,7 @@ def _maybe_do_update(cfg: dict, is_exiting) -> None:
         try:
             import webbrowser
             from proxy import __version__
-            from utils.update_check import RELEASES_PAGE_URL, get_status, run_check
+            from utils.update_check import RELEASES_PAGE_URL, get_status, get_update_asset, run_check
 
             run_check(__version__)
             st = get_status()
@@ -370,6 +472,8 @@ def _maybe_do_update(cfg: dict, is_exiting) -> None:
                 return
             url = (st.get("html_url") or "").strip() or RELEASES_PAGE_URL
             ver = st.get("latest") or "?"
+            asset = get_update_asset(Path(sys.executable)) if IS_FROZEN else None
+            download_url = asset[0] if asset else None
 
             if not ensure_ctk_thread(ctk, _config.get("appearance", "auto")):
                 if _ask_yes_no(
@@ -384,9 +488,11 @@ def _maybe_do_update(cfg: dict, is_exiting) -> None:
             def _build(done: threading.Event) -> None:
                 from ui.ctk_theme import main_content_frame
                 theme = ctk_theme_for_platform()
+                w = 310 if IS_FROZEN else 210
+                h = 140 if IS_FROZEN else 110
                 root = create_ctk_toplevel(
                     ctk, title="TG WS Proxy — обновление",
-                    width=310, height=110, theme=theme,
+                    width=w, height=h, theme=theme,
                     after_create=_apply_window_icon,
                 )
                 frame = main_content_frame(ctk, root, theme, padx=16, pady=14)
@@ -400,18 +506,53 @@ def _maybe_do_update(cfg: dict, is_exiting) -> None:
                 row = ctk.CTkFrame(frame, fg_color="transparent")
                 row.pack(fill="x")
 
+                status_label = ctk.CTkLabel(
+                    frame, text="", justify="left", anchor="w", wraplength=270,
+                    font=(theme.ui_font_family, 11), text_color=theme.text_secondary,
+                )
+                status_label.pack(fill="x", pady=(6, 0))
+
+                btns: list = []
+
+                def _set_status(msg: str) -> None:
+                    root.after(0, lambda: status_label.configure(text=msg))
+
                 def _close(open_browser: bool) -> None:
                     result["open"] = open_browser
                     root.destroy()
                     done.set()
 
-                ctk.CTkButton(
-                    row, text="Страница", width=100, height=34,
+                def _on_update() -> None:
+                    if not download_url:
+                        if url:
+                            webbrowser.open(url)
+                        _close(True)
+                        return
+                    for b in btns:
+                        b.configure(state="disabled")
+                    root.protocol("WM_DELETE_WINDOW", lambda: None)
+                    def _run():
+                        _perform_update(download_url, set_status=_set_status)
+                        root.after(0, lambda: [b.configure(state="normal") for b in btns])
+                        root.after(0, lambda: root.protocol("WM_DELETE_WINDOW", lambda: _close(False)))
+                    threading.Thread(target=_run, daemon=True).start()
+
+                if IS_FROZEN:
+                    btn_upd = ctk.CTkButton(
+                        row, text="Обновить", width=88, height=34,
+                        font=(theme.ui_font_family, 13), command=_on_update,
+                    )
+                    btn_upd.pack(side="left", padx=(0, 6))
+                    btns.append(btn_upd)
+                btn_pg = ctk.CTkButton(
+                    row, text="Страница", width=88, height=34,
                     font=(theme.ui_font_family, 13),
                     command=lambda: _close(True),
-                ).pack(side="left", padx=(0, 6))
+                )
+                btn_pg.pack(side="left", padx=(0, 6))
+                btns.append(btn_pg)
                 ctk.CTkButton(
-                    row, text="Закрыть", width=100, height=34,
+                    row, text="Закрыть", width=88, height=34,
                     font=(theme.ui_font_family, 13),
                     fg_color=theme.field_bg, hover_color=theme.field_border,
                     text_color=theme.text_primary, border_width=1, border_color=theme.field_border,

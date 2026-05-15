@@ -257,20 +257,24 @@ def get_update_asset(exe_path: Path) -> Optional[Tuple[str, str]]:
     except Exception:
         pass
 
-    # Fallback
+    # Fallback by platform / arch
     import struct
     is_64 = struct.calcsize("P") * 8 == 64
-    try:
-        is_modern = sys.getwindowsversion().major >= 10
-    except Exception:
-        is_modern = True
-    if is_modern:
-        name = "TgWsProxy_windows.exe"
-    elif is_64:
-        name = "TgWsProxy_windows_7_64bit.exe"
+    if sys.platform.startswith("linux"):
+        name = "TgWsProxy_linux_amd64" if is_64 else None
     else:
-        name = "TgWsProxy_windows_7_32bit.exe"
-    for a in assets:
-        if a.get("name") == name:
-            return a["url"], a["name"]
+        try:
+            is_modern = sys.getwindowsversion().major >= 10
+        except Exception:
+            is_modern = True
+        if is_modern:
+            name = "TgWsProxy_windows.exe"
+        elif is_64:
+            name = "TgWsProxy_windows_7_64bit.exe"
+        else:
+            name = "TgWsProxy_windows_7_32bit.exe"
+    if name:
+        for a in assets:
+            if a.get("name") == name:
+                return a["url"], a["name"]
     return None
