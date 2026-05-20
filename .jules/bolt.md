@@ -1,0 +1,3 @@
+## 2024-06-25 - MsgSplitter buffer shifting O(N^2)
+**Learning:** In the `proxy/bridge.py`, the `MsgSplitter` class was repeatedly deleting from the start of its internal `bytearray` buffers (`_cipher_buf` and `_plain_buf`) inside a `while` loop that processes each MTProto packet. Because MTProto packets can be small, a single chunk can contain many packets. Deleting from the start of a `bytearray` requires shifting all remaining bytes, making the parsing loop O(N^2) in the number of packets per chunk.
+**Action:** When extracting multiple items from a buffer, use an offset index to track progress and slice out the items. Only delete from the buffer once at the end of the extraction loop using the accumulated offset.
