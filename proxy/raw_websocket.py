@@ -1,6 +1,7 @@
 import os
 import ssl
 import base64
+import sys
 import struct
 import asyncio
 import socket as _socket
@@ -41,9 +42,12 @@ def _xor_mask(data: bytes, mask: bytes) -> bytes:
     if not data:
         return data
     n = len(data)
+    # Using sys.byteorder allows Python to use its native integer representation
+    # without reversing byte sequences on little-endian architectures, slightly
+    # improving overall performance.
     mask_rep = (mask * (n // 4 + 1))[:n]
-    return (int.from_bytes(data, 'big') ^
-            int.from_bytes(mask_rep, 'big')).to_bytes(n, 'big')
+    return (int.from_bytes(data, sys.byteorder) ^
+            int.from_bytes(mask_rep, sys.byteorder)).to_bytes(n, sys.byteorder)
 
 
 def set_sock_opts(transport, buffer_size):
