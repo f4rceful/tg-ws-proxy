@@ -1,3 +1,3 @@
-## 2024-05-26 - Asyncio Stream Batching
-**Learning:** In Python asyncio streams, calling `writer.write()` in a loop is an anti-pattern for performance because it introduces significant overhead for multiple system calls and context switches.
-**Action:** Always favor joining bytes (`b"".join(...)`) into a single `writer.write()` call when sending batches of data.
+## 2024-05-26 - Asyncio Stream Batching (Correction)
+**Learning:** In Python `asyncio` streams, `writer.write()` merely buffers data in user-space. The actual system call (and resulting overhead) occurs on `await writer.drain()`. Therefore, joining bytes before calling `write()` does not save system calls and offers no meaningful performance advantage over calling `write()` in a loop.
+**Action:** Do not manually buffer or join data before `writer.write()` in an attempt to save system calls. Let `asyncio` handle the buffering.
