@@ -1,5 +1,6 @@
 import os
 import ssl
+import sys
 import base64
 import struct
 import asyncio
@@ -42,8 +43,12 @@ def _xor_mask(data: bytes, mask: bytes) -> bytes:
         return data
     n = len(data)
     mask_rep = (mask * (n // 4 + 1))[:n]
-    return (int.from_bytes(data, 'big') ^
-            int.from_bytes(mask_rep, 'big')).to_bytes(n, 'big')
+    # XOR is bitwise-symmetric, so the byte order used to view the buffers as
+    # integers does not affect the result as long as it is consistent. Native
+    # byteorder lets CPython skip the byte swap it does for 'big' on
+    # little-endian hosts.
+    return (int.from_bytes(data, sys.byteorder) ^
+            int.from_bytes(mask_rep, sys.byteorder)).to_bytes(n, sys.byteorder)
 
 
 def set_sock_opts(transport, buffer_size):
