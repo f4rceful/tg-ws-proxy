@@ -1,0 +1,3 @@
+## 2024-06-02 - Asyncio Stream Write Batching
+**Learning:** In Python's asyncio streams, repeatedly calling `writer.write()` inside a loop for multiple chunks of data can be significantly slower than joining the chunks into a single byte string (e.g., `b''.join(...)`) and calling `writer.write()` once. Each `writer.write()` invocation has overhead; batching bytes optimizes the underlying buffer operations and reduces write syscalls.
+**Action:** When sending a batch of payloads over an asyncio stream, combine the byte frames using `b''.join(frames)` before writing to the stream to improve throughput and reduce latency.
