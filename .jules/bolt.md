@@ -1,0 +1,3 @@
+## 2024-05-24 - [Asyncio Stream Batching]
+**Learning:** In Python asyncio streams, using `b''.join(...)` to concatenate bytes into a single object before calling `writer.write()` is significantly faster and more performant than looping through items and calling `writer.write()` multiple times. The overhead of individual write calls and event loop processing is greatly reduced by batching the data first.
+**Action:** Always favor joining byte sequences in memory prior to writing them to an asyncio stream writer rather than issuing multiple sequential writes, especially for bulk operations or batch processing.
