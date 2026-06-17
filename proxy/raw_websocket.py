@@ -155,30 +155,36 @@ class RawWebSocket:
         await self.writer.drain()
 
     async def recv(self) -> Optional[bytes]:
+        read_frame = self._read_frame
+        build_frame = self._build_frame
+        writer = self.writer
+        op_close = self.OP_CLOSE
+        op_ping = self.OP_PING
+        op_pong = self.OP_PONG
         while not self._closed:
-            opcode, payload = await self._read_frame()
+            opcode, payload = await read_frame()
 
-            if opcode == self.OP_CLOSE:
+            if opcode == op_close:
                 self._closed = True
                 try:
-                    self.writer.write(self._build_frame(
-                        self.OP_CLOSE,
+                    writer.write(build_frame(
+                        op_close,
                         payload[:2] if payload else b'', mask=True))
-                    await self.writer.drain()
+                    await writer.drain()
                 except Exception:
                     pass
                 return None
 
-            if opcode == self.OP_PING:
+            if opcode == op_ping:
                 try:
-                    self.writer.write(
-                        self._build_frame(self.OP_PONG, payload, mask=True))
-                    await self.writer.drain()
+                    writer.write(
+                        build_frame(op_pong, payload, mask=True))
+                    await writer.drain()
                 except Exception:
                     pass
                 continue
 
-            if opcode == self.OP_PONG:
+            if opcode == op_pong:
                 continue
 
             if opcode in (0x1, 0x2):
@@ -218,20 +224,22 @@ class RawWebSocket:
         if length < 126:
             return _st_BB4s.pack(fb, 0x80 | length, mask_key) + masked
         if length < 65536:
-            return _st_BBH4s.pack(fb, 0x80 | 126, length, mask_key) + masked
-        return _st_BBQ4s.pack(fb, 0x80 | 127, length, mask_key) + masked
+            return _st_BBH4s.pack(fb, 0xFE, length, mask_key) + masked
+        return _st_BBQ4s.pack(fb, 0xFF, length, mask_key) + masked
 
     async def _read_frame(self) -> Tuple[int, bytes]:
-        hdr = await self.reader.readexactly(2)
+        readexactly = self.reader.readexactly
+        hdr = await readexactly(2)
         opcode = hdr[0] & 0x0F
-        length = hdr[1] & 0x7F
+        b1 = hdr[1]
+        length = b1 & 0x7F
         if length == 126:
-            length = _st_H.unpack(await self.reader.readexactly(2))[0]
+            length = _st_H.unpack(await readexactly(2))[0]
         elif length == 127:
-            length = _st_Q.unpack(await self.reader.readexactly(8))[0]
-        if hdr[1] & 0x80:
-            mask_key = await self.reader.readexactly(4)
-            payload = await self.reader.readexactly(length)
+            length = _st_Q.unpack(await readexactly(8))[0]
+        if b1 & 0x80:
+            mask_key = await readexactly(4)
+            payload = await readexactly(length)
             return opcode, _xor_mask(payload, mask_key)
-        payload = await self.reader.readexactly(length)
+        payload = await readexactly(length)
         return opcode, payload

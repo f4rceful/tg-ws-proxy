@@ -53,30 +53,33 @@ class MsgSplitter:
         if self._disabled:
             return [chunk]
 
-        self._cipher_buf.extend(chunk)
+        cipher_buf = self._cipher_buf
+        cipher_buf.extend(chunk)
         self._plain_buf.extend(self._dec.update(chunk))
 
         parts = []
+        append = parts.append
+        next_packet_len = self._next_packet_len
         offset = 0
-        buf_len = len(self._cipher_buf)
+        buf_len = len(cipher_buf)
         # Walk the buffer with an offset instead of deleting each packet from
         # the front. Front-deletion on a bytearray shifts the remaining bytes,
         # so a chunk holding many small packets degrades to O(N^2); a single
         # trailing del keeps splitting O(N).
         while offset < buf_len:
-            packet_len = self._next_packet_len(offset, buf_len - offset)
+            packet_len = next_packet_len(offset, buf_len - offset)
             if packet_len is None:
                 break
             if packet_len <= 0:
-                parts.append(bytes(self._cipher_buf[offset:]))
+                append(bytes(cipher_buf[offset:]))
                 offset = buf_len
                 self._disabled = True
                 break
-            parts.append(bytes(self._cipher_buf[offset:offset + packet_len]))
+            append(bytes(cipher_buf[offset:offset + packet_len]))
             offset += packet_len
 
         if offset:
-            del self._cipher_buf[:offset]
+            del cipher_buf[:offset]
             del self._plain_buf[:offset]
         return parts
 
@@ -99,12 +102,13 @@ class MsgSplitter:
         return 0
 
     def _next_abridged_len(self, offset: int, avail: int) -> Optional[int]:
-        first = self._plain_buf[offset]
-        if first in (0x7F, 0xFF):
+        plain_buf = self._plain_buf
+        first = plain_buf[offset]
+        if first == 0x7F or first == 0xFF:
             if avail < 4:
                 return None
             payload_len = int.from_bytes(
-                self._plain_buf[offset + 1:offset + 4], 'little') * 4
+                plain_buf[offset + 1:offset + 4], 'little') * 4
             header_len = 4
         else:
             payload_len = (first & 0x7F) * 4
@@ -282,31 +286,43 @@ async def bridge_ws_reencrypt(reader, writer, ws: RawWebSocket, label,
 
     async def tcp_to_ws():
         nonlocal up_bytes, up_packets
+        read = reader.read
+        clt_dec_update = ctx.clt_dec.update
+        tg_enc_update = ctx.tg_enc.update
+        ws_send = ws.send
         try:
-            while True:
-                chunk = await reader.read(65536)
-                if not chunk:
-                    if splitter:
+            if splitter:
+                split = splitter.split
+                send_batch = ws.send_batch
+                while True:
+                    chunk = await read(65536)
+                    if not chunk:
                         tail = splitter.flush()
                         if tail:
-                            await ws.send(tail[0])
-                    break
-                n = len(chunk)
-                stats.bytes_up += n
-                up_bytes += n
-                up_packets += 1
-                plain = ctx.clt_dec.update(chunk)
-                chunk = ctx.tg_enc.update(plain)
-                if splitter:
-                    parts = splitter.split(chunk)
+                            await ws_send(tail[0])
+                        break
+                    n = len(chunk)
+                    stats.bytes_up += n
+                    up_bytes += n
+                    up_packets += 1
+                    chunk = tg_enc_update(clt_dec_update(chunk))
+                    parts = split(chunk)
                     if not parts:
                         continue
                     if len(parts) > 1:
-                        await ws.send_batch(parts)
+                        await send_batch(parts)
                     else:
-                        await ws.send(parts[0])
-                else:
-                    await ws.send(chunk)
+                        await ws_send(parts[0])
+            else:
+                while True:
+                    chunk = await read(65536)
+                    if not chunk:
+                        break
+                    n = len(chunk)
+                    stats.bytes_up += n
+                    up_bytes += n
+                    up_packets += 1
+                    await ws_send(tg_enc_update(clt_dec_update(chunk)))
         except (asyncio.CancelledError, ConnectionError, OSError):
             return
         except Exception as e:
@@ -314,19 +330,22 @@ async def bridge_ws_reencrypt(reader, writer, ws: RawWebSocket, label,
 
     async def ws_to_tcp():
         nonlocal down_bytes, down_packets
+        recv = ws.recv
+        tg_dec_update = ctx.tg_dec.update
+        clt_enc_update = ctx.clt_enc.update
+        write = writer.write
+        drain = writer.drain
         try:
             while True:
-                data = await ws.recv()
+                data = await recv()
                 if data is None:
                     break
                 n = len(data)
                 stats.bytes_down += n
                 down_bytes += n
                 down_packets += 1
-                plain = ctx.tg_dec.update(data)
-                data = ctx.clt_enc.update(plain)
-                writer.write(data)
-                await writer.drain()
+                write(clt_enc_update(tg_dec_update(data)))
+                await drain()
         except (asyncio.CancelledError, ConnectionError, OSError):
             return
         except Exception as e:
@@ -367,22 +386,28 @@ async def _bridge_tcp_reencrypt(reader, writer, remote_reader, remote_writer,
     """Bidirectional TCP <-> TCP with re-encryption."""
 
     async def forward(src, dst_w, is_up):
+        read = src.read
+        write = dst_w.write
+        drain = dst_w.drain
+        # Crypto direction is loop-invariant; resolve it once up front.
+        if is_up:
+            dec_update = ctx.clt_dec.update
+            enc_update = ctx.tg_enc.update
+        else:
+            dec_update = ctx.tg_dec.update
+            enc_update = ctx.clt_enc.update
         try:
             while True:
-                data = await src.read(65536)
+                data = await read(65536)
                 if not data:
                     break
                 n = len(data)
                 if is_up:
                     stats.bytes_up += n
-                    plain = ctx.clt_dec.update(data)
-                    data = ctx.tg_enc.update(plain)
                 else:
                     stats.bytes_down += n
-                    plain = ctx.tg_dec.update(data)
-                    data = ctx.clt_enc.update(plain)
-                dst_w.write(data)
-                await dst_w.drain()
+                write(enc_update(dec_update(data)))
+                await drain()
         except asyncio.CancelledError:
             pass
         except Exception as e:
