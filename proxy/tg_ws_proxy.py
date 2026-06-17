@@ -46,9 +46,9 @@ def _try_handshake(handshake: bytes, secret: bytes) -> Optional[Tuple[int, bool,
 
     dec_key = hashlib.sha256(dec_prekey + secret).digest()
 
-    dec_iv_int = int.from_bytes(dec_iv, 'big')
+    # dec_iv is already exactly IV_LEN (16) bytes; pass it straight through.
     decryptor = Cipher(
-        algorithms.AES(dec_key), modes.CTR(dec_iv_int.to_bytes(16, 'big'))
+        algorithms.AES(dec_key), modes.CTR(dec_iv)
     ).encryptor()
     decrypted = decryptor.update(handshake)
 
@@ -90,10 +90,13 @@ def _generate_relay_init(proto_tag: bytes, dc_idx: int) -> bytes:
     tail_plain = proto_tag + dc_bytes + os.urandom(2)
 
     encrypted_full = encryptor.update(rnd_bytes)
-    keystream_tail = bytes(
-        encrypted_full[i] ^ rnd_bytes[i] for i in range(56, 64))
-    encrypted_tail = bytes(
-        tail_plain[i] ^ keystream_tail[i] for i in range(8))
+    # keystream over the 8-byte tail == ciphertext XOR plaintext;
+    # re-encrypt the real tail by XOR'ing it with that keystream.
+    keystream_tail = (
+        int.from_bytes(encrypted_full[PROTO_TAG_POS:HANDSHAKE_LEN], 'big')
+        ^ int.from_bytes(rnd_bytes[PROTO_TAG_POS:HANDSHAKE_LEN], 'big'))
+    encrypted_tail = (
+        int.from_bytes(tail_plain, 'big') ^ keystream_tail).to_bytes(8, 'big')
 
     result = bytearray(rnd_bytes)
     result[PROTO_TAG_POS:HANDSHAKE_LEN] = encrypted_tail

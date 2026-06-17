@@ -35,6 +35,10 @@ TLS_APPDATA_MAX = 16384
 
 _CCS_FRAME = b'\x14\x03\x03\x00\x01\x01'
 
+_STRUCT_H = struct.Struct('>H')
+
+_ZERO_RANDOM = b'\x00' * CLIENT_RANDOM_LEN
+
 _SERVER_HELLO_TEMPLATE = bytearray(
     b'\x16\x03\x03\x00\x7a'
     b'\x02\x00\x00\x76'
@@ -64,12 +68,14 @@ def verify_client_hello(data: bytes, secret: bytes) -> Optional[Tuple[bytes, byt
     if data[5] != 0x01:
         return None
 
-    client_random = bytes(data[CLIENT_RANDOM_OFFSET:CLIENT_RANDOM_OFFSET + CLIENT_RANDOM_LEN])
+    random_end = CLIENT_RANDOM_OFFSET + CLIENT_RANDOM_LEN
+    client_random = data[CLIENT_RANDOM_OFFSET:random_end]
 
-    zeroed = bytearray(data)
-    zeroed[CLIENT_RANDOM_OFFSET:CLIENT_RANDOM_OFFSET + CLIENT_RANDOM_LEN] = b'\x00' * CLIENT_RANDOM_LEN
-
-    expected = hmac.new(secret, bytes(zeroed), hashlib.sha256).digest()
+    mac = hmac.new(secret, digestmod=hashlib.sha256)
+    mac.update(data[:CLIENT_RANDOM_OFFSET])
+    mac.update(_ZERO_RANDOM)
+    mac.update(data[random_end:])
+    expected = mac.digest()
 
     if not hmac.compare_digest(expected[:28], client_random[:28]):
         return None
@@ -83,7 +89,7 @@ def verify_client_hello(data: bytes, secret: bytes) -> Optional[Tuple[bytes, byt
 
     session_id = b'\x00' * SESSION_ID_LEN
     if n >= SESSION_ID_OFFSET + SESSION_ID_LEN and data[43] == 0x20:
-        session_id = bytes(data[SESSION_ID_OFFSET:SESSION_ID_OFFSET + SESSION_ID_LEN])
+        session_id = data[SESSION_ID_OFFSET:SESSION_ID_OFFSET + SESSION_ID_LEN]
 
     return client_random, session_id, timestamp
 
@@ -96,7 +102,7 @@ def build_server_hello(secret: bytes, client_random: bytes, session_id: bytes) -
     ccs = _CCS_FRAME
     encrypted_size = random.randint(1900, 2100)
     encrypted_data = os.urandom(encrypted_size)
-    app_record = b'\x17\x03\x03' + struct.pack('>H', encrypted_size) + encrypted_data
+    app_record = b'\x17\x03\x03' + _STRUCT_H.pack(encrypted_size) + encrypted_data
 
     response = bytes(sh) + ccs + app_record
 
@@ -110,16 +116,14 @@ def build_server_hello(secret: bytes, client_random: bytes, session_id: bytes) -
 
 
 def wrap_tls_record(data: bytes) -> bytes:
+    total = len(data)
     parts = []
     offset = 0
-    while offset < len(data):
+    while offset < total:
         chunk = data[offset:offset + TLS_APPDATA_MAX]
-        parts.append(
-            b'\x17\x03\x03'
-            + struct.pack('>H', len(chunk))
-            + chunk
-        )
-        offset += len(chunk)
+        chunk_len = len(chunk)
+        parts.append(b'\x17\x03\x03' + _STRUCT_H.pack(chunk_len) + chunk)
+        offset += chunk_len
     return b''.join(parts)
 
 
@@ -166,7 +170,7 @@ class FakeTlsStream:
         while True:
             hdr = await self._reader.readexactly(5)
             rtype = hdr[0]
-            rec_len = struct.unpack('>H', hdr[3:5])[0]
+            rec_len = _STRUCT_H.unpack_from(hdr, 3)[0]
 
             if rtype == TLS_RECORD_CCS:
                 if rec_len > 0:
