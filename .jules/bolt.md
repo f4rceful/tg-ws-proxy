@@ -1,0 +1,3 @@
+## 2024-03-21 - Optimize asyncio stream writes with batching
+**Learning:** Calling `writer.write()` inside a loop in Python asyncio streams introduces significant overhead due to context switches and event loop interactions, which is detrimental to performance in high-throughput networking code like WebSocket proxies.
+**Action:** Always favor joining bytes into a single `writer.write()` call (e.g. using `b''.join(...)`) rather than making multiple `write()` calls, especially in methods like `send_batch`.
