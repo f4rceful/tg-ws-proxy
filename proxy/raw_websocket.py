@@ -149,9 +149,10 @@ class RawWebSocket:
     async def send_batch(self, parts: List[bytes]):
         if self._closed:
             raise ConnectionError("WebSocket closed")
-        for part in parts:
-            self.writer.write(
-                self._build_frame(self.OP_BINARY, part, mask=True))
+        # ⚡ Bolt: Join frames into a single bytes object for optimal batching performance
+        # This reduces asyncio overhead compared to multiple writer.write() calls
+        frames = [self._build_frame(self.OP_BINARY, part, mask=True) for part in parts]
+        self.writer.write(b''.join(frames))
         await self.writer.drain()
 
     async def recv(self) -> Optional[bytes]:
