@@ -79,19 +79,34 @@ def create_ctk_toplevel(
     root.resizable(False, False)
     center_ctk_geometry(root, width, height)
     root.configure(fg_color=theme.bg)
+
+    _after_ids = []
+
     if topmost:
         root.attributes("-topmost", True)
+
+        def _drop_topmost() -> None:
+            try:
+                root.attributes("-topmost", False)
+            except Exception:
+                pass
+
+        _after_ids.append(root.after(200, _drop_topmost))
+
     root.lift()
     root.focus_force()
     if after_create:
-        _after_id = root.after(300, lambda: after_create(root))
+        _after_ids.append(root.after(300, lambda: after_create(root)))
+
+    if _after_ids:
         _orig_destroy = root.destroy
 
         def _safe_destroy():
-            try:
-                root.after_cancel(_after_id)
-            except Exception:
-                pass
+            for _aid in _after_ids:
+                try:
+                    root.after_cancel(_aid)
+                except Exception:
+                    pass
             _orig_destroy()
 
         root.destroy = _safe_destroy
